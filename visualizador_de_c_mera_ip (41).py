@@ -17,9 +17,7 @@ DEFAULT_CONFIG = {
     "camera_ip": "192.168.0.10",
     "flip_h": False,
     "flip_v": False,
-    "rotation_angle": 0,
-    "exposure_manual": False,
-    "exposure_val": 0
+    "rotation_angle": 0
 }
 
 def load_config():
@@ -40,9 +38,7 @@ def save_config():
         "camera_ip": camera_ip,
         "flip_h": flip_h,
         "flip_v": flip_v,
-        "rotation_angle": rotation_angle,
-        "exposure_manual": exposure_manual,
-        "exposure_val": exposure_val
+        "rotation_angle": rotation_angle
     }
     try:
         with open(CONFIG_FILE, 'w') as f:
@@ -57,8 +53,6 @@ camera_ip = config.get("camera_ip", "192.168.0.10")
 flip_h = config.get("flip_h", False)
 flip_v = config.get("flip_v", False)
 rotation_angle = config.get("rotation_angle", 0)
-exposure_manual = config.get("exposure_manual", False)
-exposure_val = config.get("exposure_val", 0)
 
 # Variáveis Globais de Controle da Aplicação
 cap = None
@@ -203,6 +197,26 @@ def prompt_new_ip():
     except Exception as e:
         print(f"[ERRO] Erro na janela de IP: {e}")
 
+def letterbox_frame(frame, target_w, target_h):
+    """Ajusta a imagem para caber no tamanho alvo mantendo a proporção exata (sem distorção) com letterbox."""
+    fh, fw = frame.shape[:2]
+    if fw <= 0 or fh <= 0:
+        return np.zeros((target_h, target_w, 3), dtype=np.uint8)
+
+    scale = min(target_w / fw, target_h / fh)
+    nw, nh = max(1, int(round(fw * scale))), max(1, int(round(fh * scale)))
+
+    if fw == nw and fh == nh:
+        resized = frame
+    else:
+        resized = cv2.resize(frame, (nw, nh), interpolation=cv2.INTER_LINEAR)
+
+    canvas = np.zeros((target_h, target_w, 3), dtype=np.uint8)
+    ox = (target_w - nw) // 2
+    oy = (target_h - nh) // 2
+    canvas[oy:oy+nh, ox:ox+nw] = resized
+    return canvas
+
 def update_window_size(window_name, width, height):
     """Ajusta o tamanho da janela OpenCV dependendo da orientação (retrato ou paisagem)"""
     try:
@@ -210,123 +224,155 @@ def update_window_size(window_name, width, height):
     except Exception as e:
         print(f"[ERRO] Falha ao redimensionar janela: {e}")
 
+def draw_rounded_rect(img, pt1, pt2, color, radius=6, thickness=-1):
+    """Desenha um retângulo com cantos arredondados suavemente."""
+    x1, y1 = pt1
+    x2, y2 = pt2
+    r = max(1, min(radius, (x2 - x1) // 2, (y2 - y1) // 2))
+    if thickness == -1:
+        cv2.rectangle(img, (x1 + r, y1), (x2 - r, y2), color, -1)
+        cv2.rectangle(img, (x1, y1 + r), (x2, y2 - r), color, -1)
+        cv2.circle(img, (x1 + r, y1 + r), r, color, -1)
+        cv2.circle(img, (x2 - r, y1 + r), r, color, -1)
+        cv2.circle(img, (x1 + r, y2 - r), r, color, -1)
+        cv2.circle(img, (x2 - r, y2 - r), r, color, -1)
+    else:
+        cv2.line(img, (x1 + r, y1), (x2 - r, y1), color, thickness, cv2.LINE_AA)
+        cv2.line(img, (x1 + r, y2), (x2 - r, y2), color, thickness, cv2.LINE_AA)
+        cv2.line(img, (x1, y1 + r), (x1, y2 - r), color, thickness, cv2.LINE_AA)
+        cv2.line(img, (x2, y1 + r), (x2, y2 - r), color, thickness, cv2.LINE_AA)
+        cv2.ellipse(img, (x1 + r, y1 + r), (r, r), 180, 0, 90, color, thickness, cv2.LINE_AA)
+        cv2.ellipse(img, (x2 - r, y1 + r), (r, r), 270, 0, 90, color, thickness, cv2.LINE_AA)
+        cv2.ellipse(img, (x2 - r, y2 - r), (r, r), 0, 0, 90, color, thickness, cv2.LINE_AA)
+        cv2.ellipse(img, (x1 + r, y2 - r), (r, r), 90, 0, 90, color, thickness, cv2.LINE_AA)
+
+def draw_menu_panel(img, pt1, pt2, title):
+    """Desenha o container do menu com fundo translúcido escuro e título centralizado."""
+    x1, y1 = pt1
+    x2, y2 = pt2
+    sub = img[y1:y2, x1:x2]
+    if sub.size > 0:
+        bg = np.full_like(sub, (22, 25, 32), dtype=np.uint8)
+        cv2.addWeighted(bg, 0.94, sub, 0.06, 0, sub)
+        img[y1:y2, x1:x2] = sub
+    draw_rounded_rect(img, pt1, pt2, (60, 68, 85), radius=8, thickness=1)
+
+    (tw, th), _ = cv2.getTextSize(title, cv2.FONT_HERSHEY_SIMPLEX, 0.38, 1)
+    tx = x1 + ((x2 - x1) - tw) // 2
+    cv2.putText(img, title, (tx, y1 + 22), cv2.FONT_HERSHEY_SIMPLEX, 0.38, (235, 240, 250), 1, cv2.LINE_AA)
+    cv2.line(img, (x1 + 14, y1 + 32), (x2 - 14, y1 + 32), (50, 58, 72), 1, cv2.LINE_AA)
+
+def draw_menu_button(img, pt1, pt2, text, bg_color, text_color=(240, 245, 250), border_color=(65, 75, 95), font_scale=0.35, center=True):
+    """Desenha um botão estilizado com cantos suaves e texto alinhado."""
+    x1, y1 = pt1
+    x2, y2 = pt2
+    draw_rounded_rect(img, pt1, pt2, bg_color, radius=6, thickness=-1)
+    if border_color:
+        draw_rounded_rect(img, pt1, pt2, border_color, radius=6, thickness=1)
+    (tw, th), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, font_scale, 1)
+    btn_w = x2 - x1
+    btn_h = y2 - y1
+    ty = y1 + (btn_h + th) // 2
+    tx = x1 + (btn_w - tw) // 2 if center else x1 + 14
+    cv2.putText(img, text, (tx, ty), cv2.FONT_HERSHEY_SIMPLEX, font_scale, text_color, 1, cv2.LINE_AA)
+
 def mouse_callback(event, x, y, flags, param):
     """Gerenciador de cliques de mouse nos botões da interface"""
     global menu_open, sub_menu, is_recording, video_writer, motion_detection
-    global flip_h, flip_v, rotation_angle, prev_gray_frame, camera_ip, cap, exposure_manual, exposure_val
+    global flip_h, flip_v, rotation_angle, prev_gray_frame, camera_ip, cap
 
     if event == cv2.EVENT_LBUTTONDOWN:
-        # Clique no Botao de Menu (Icone de Hamburguer: X: 8 a 36, Y: 8 a 34)
-        if 8 <= x <= 36 and 8 <= y <= 34:
+        # Clique no Botao de Menu (Icone Hamburguer / Fechar: X: 12 a 46, Y: 12 a 44)
+        if 12 <= x <= 46 and 12 <= y <= 44:
             menu_open = not menu_open
             sub_menu = None
             return
 
         if menu_open:
+            btn_x1, btn_x2 = 24, 188
             if sub_menu is None:
-                # Opcao 1: Foto (Y: 45 a 67)
-                if 8 <= x <= 142 and 45 <= y <= 67:
+                # Opcao 1: Tirar Foto (Y: 96 a 124)
+                if btn_x1 <= x <= btn_x2 and 96 <= y <= 124:
                     param['take_photo'] = True
 
-                # Opcao 2: Gravar Video (Y: 71 a 93)
-                elif 8 <= x <= 142 and 71 <= y <= 93:
+                # Opcao 2: Gravar Video (Y: 132 a 160)
+                elif btn_x1 <= x <= btn_x2 and 132 <= y <= 160:
                     is_recording = not is_recording
 
-                # Opcao 3: Deteccao Movimento (Y: 97 a 119)
-                elif 8 <= x <= 142 and 97 <= y <= 119:
+                # Opcao 3: Deteccao Movimento (Y: 168 a 196)
+                elif btn_x1 <= x <= btn_x2 and 168 <= y <= 196:
                     motion_detection = not motion_detection
                     prev_gray_frame = None
 
-                # Opcao 4: Configuracoes (Y: 123 a 145)
-                elif 8 <= x <= 142 and 123 <= y <= 145:
+                # Opcao 4: Configuracoes (Y: 204 a 232)
+                elif btn_x1 <= x <= btn_x2 and 204 <= y <= 232:
                     sub_menu = 'config'
 
             elif sub_menu == 'config':
-                # Botao Voltar (Y: 45 a 63)
-                if 8 <= x <= 142 and 45 <= y <= 63:
+                # Botao Voltar (Y: 96 a 122)
+                if btn_x1 <= x <= btn_x2 and 96 <= y <= 122:
                     sub_menu = None
 
-                # Botao Inverter Horizontal (Y: 66 a 84)
-                elif 8 <= x <= 142 and 66 <= y <= 84:
+                # Botao Inverter Horizontal (Y: 130 a 156)
+                elif btn_x1 <= x <= btn_x2 and 130 <= y <= 156:
                     flip_h = not flip_h
                     save_config()
 
-                # Botao Inverter Vertical (Y: 87 a 105)
-                elif 8 <= x <= 142 and 87 <= y <= 105:
+                # Botao Inverter Vertical (Y: 164 a 190)
+                elif btn_x1 <= x <= btn_x2 and 164 <= y <= 190:
                     flip_v = not flip_v
                     save_config()
 
-                # Rotacao 0 deg (Y: 108 a 124, X: 8 a 38)
-                elif 8 <= x <= 38 and 108 <= y <= 124:
-                    rotation_angle = 0
-                    prev_gray_frame = None
-                    save_config()
-                    param['need_resize'] = True
-
-                # Rotacao 90 deg (Y: 108 a 124, X: 41 a 71)
-                elif 41 <= x <= 71 and 108 <= y <= 124:
-                    rotation_angle = 90
-                    prev_gray_frame = None
-                    save_config()
-                    param['need_resize'] = True
-
-                # Rotacao 180 deg (Y: 108 a 124, X: 74 a 104)
-                elif 74 <= x <= 104 and 108 <= y <= 124:
-                    rotation_angle = 180
-                    prev_gray_frame = None
-                    save_config()
-                    param['need_resize'] = True
-
-                # Rotacao 270 deg (Y: 108 a 124, X: 107 a 137)
-                elif 107 <= x <= 137 and 108 <= y <= 124:
-                    rotation_angle = 270
-                    prev_gray_frame = None
-                    save_config()
-                    param['need_resize'] = True
-
-                # Exposicao AUTO / MANUAL (Y: 127 a 145)
-                elif 8 <= x <= 142 and 127 <= y <= 145:
-                    exposure_manual = not exposure_manual
-                    save_config()
-
-                # Botao - Exp (Y: 148 a 166, X: 8 a 72)
-                elif 8 <= x <= 72 and 148 <= y <= 166:
-                    if exposure_manual:
-                        exposure_val = max(-10, exposure_val - 1)
+                # Botoes de Rotacao (Y: 198 a 224)
+                # 0 deg: 24..61 | 90 deg: 66..103 | 180 deg: 108..145 | 270 deg: 150..187
+                elif 198 <= y <= 224:
+                    if 24 <= x <= 61:
+                        rotation_angle = 0
+                        prev_gray_frame = None
                         save_config()
-
-                # Botao + Exp (Y: 148 a 166, X: 75 a 142)
-                elif 75 <= x <= 142 and 148 <= y <= 166:
-                    if exposure_manual:
-                        exposure_val = min(10, exposure_val + 1)
+                        param['need_resize'] = True
+                    elif 66 <= x <= 103:
+                        rotation_angle = 90
+                        prev_gray_frame = None
                         save_config()
+                        param['need_resize'] = True
+                    elif 108 <= x <= 145:
+                        rotation_angle = 180
+                        prev_gray_frame = None
+                        save_config()
+                        param['need_resize'] = True
+                    elif 150 <= x <= 187:
+                        rotation_angle = 270
+                        prev_gray_frame = None
+                        save_config()
+                        param['need_resize'] = True
 
-                # Botao Rede / IPs (Y: 169 a 189)
-                elif 8 <= x <= 142 and 169 <= y <= 189:
+                # Botao Rede e IP (Y: 232 a 258)
+                elif btn_x1 <= x <= btn_x2 and 232 <= y <= 258:
                     sub_menu = 'scanner'
                     start_network_scan()
 
             elif sub_menu == 'scanner':
-                # Botao Voltar (Y: 45 a 65) -> Volta para Configuracoes
-                if 8 <= x <= 142 and 45 <= y <= 65:
+                # Botao Voltar (Y: 96 a 122) -> Volta para Configuracoes
+                if btn_x1 <= x <= btn_x2 and 96 <= y <= 122:
                     sub_menu = 'config'
 
-                # Botao Mudar IP Manualmente (Y: 69 a 89)
-                elif 8 <= x <= 142 and 69 <= y <= 89:
+                # Botao Mudar IP Manualmente (Y: 130 a 156)
+                elif btn_x1 <= x <= btn_x2 and 130 <= y <= 156:
                     prompt_new_ip()
 
-                # Botao Escanear Novamente (Y: 93 a 113)
-                elif 8 <= x <= 142 and 93 <= y <= 113:
+                # Botao Escanear Novamente (Y: 164 a 190)
+                elif btn_x1 <= x <= btn_x2 and 164 <= y <= 190:
                     if not is_scanning:
                         start_network_scan()
 
-                # Selecao de IP da lista clicavel
+                # Selecao de IP da lista clicavel (Y inicia em 228, altura 24, gap 4)
                 else:
                     max_show = min(5, len(discovered_devices))
                     for idx in range(max_show):
-                        item_y_start = 129 + (idx * 16)
-                        item_y_end = item_y_start + 14
-                        if 8 <= x <= 142 and item_y_start <= y <= item_y_end:
+                        item_y_start = 228 + (idx * 28)
+                        item_y_end = item_y_start + 24
+                        if btn_x1 <= x <= btn_x2 and item_y_start <= y <= item_y_end:
                             selected_ip, _ = discovered_devices[idx]
                             if camera_ip != selected_ip:
                                 camera_ip = selected_ip
@@ -341,7 +387,7 @@ def main():
     global stop_threads, video_writer, cap, prev_gray_frame, is_recording
 
     window_name = "Visualizador de Camera IP"
-    cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
+    cv2.namedWindow(window_name, cv2.WINDOW_NORMAL | cv2.WINDOW_KEEPRATIO)
 
     w_init, h_init = (450, 600) if rotation_angle in [90, 270] else (960, 540)
     update_window_size(window_name, w_init, h_init)
@@ -397,17 +443,9 @@ def main():
             elif flip_v:
                 frame = cv2.flip(frame, 0)
 
-            # Redimensiona o frame para bater exatamente com a dimensao da janela
+            # Ajusta o frame para bater com a dimensao da janela mantendo a proporcao (sem distorcer)
             canvas_w, canvas_h = (450, 600) if rotation_angle in [90, 270] else (960, 540)
-            if frame.shape[1] != canvas_w or frame.shape[0] != canvas_h:
-                frame = cv2.resize(frame, (canvas_w, canvas_h))
-
-            # Ajuste de Exposicao Manual
-            if exposure_manual and exposure_val != 0:
-                factor = 1.0 + (exposure_val * 0.1)
-                frame = cv2.convertScaleAbs(frame, alpha=factor, beta=0)
-
-            display_frame = frame.copy()
+            display_frame = letterbox_frame(frame, canvas_w, canvas_h)
 
             # Deteccao de Movimento
             if motion_detection:
@@ -462,101 +500,95 @@ def main():
                 print("[GRAVACAO] Finalizada.")
                 last_record_state = False
 
-        # Botao Principal de Menu (Icone Hamburguer ultra compacto)
-        cv2.rectangle(display_frame, (8, 8), (36, 34), (40, 40, 40), -1)
-        cv2.rectangle(display_frame, (8, 8), (36, 34), (180, 180, 180), 1)
-        cv2.line(display_frame, (13, 14), (31, 14), (255, 255, 255), 2)
-        cv2.line(display_frame, (13, 21), (31, 21), (255, 255, 255), 2)
-        cv2.line(display_frame, (13, 28), (31, 28), (255, 255, 255), 2)
+        # Botao Principal de Menu (Design Moderno com cantos arredondados)
+        btn_hb_bg = (48, 55, 72) if menu_open else (28, 32, 42)
+        btn_hb_border = (90, 105, 135) if menu_open else (60, 68, 85)
+        draw_rounded_rect(display_frame, (12, 12), (46, 44), btn_hb_bg, radius=6, thickness=-1)
+        draw_rounded_rect(display_frame, (12, 12), (46, 44), btn_hb_border, radius=6, thickness=1)
 
-        # Desenho da Interface de Menus (Ultra Compacta: Largura 140px)
+        cx, cy = 29, 28
         if menu_open:
-            max_menu_y = 150
-            if sub_menu == 'config':
-                max_menu_y = 195
-            elif sub_menu == 'scanner':
-                max_show_items = min(5, len(discovered_devices))
-                max_menu_y = 129 + (max_show_items * 16) + 10
+            cv2.line(display_frame, (cx - 7, cy - 7), (cx + 7, cy + 7), (255, 255, 255), 2, cv2.LINE_AA)
+            cv2.line(display_frame, (cx - 7, cy + 7), (cx + 7, cy - 7), (255, 255, 255), 2, cv2.LINE_AA)
+        else:
+            cv2.line(display_frame, (cx - 8, cy - 6), (cx + 8, cy - 6), (240, 245, 250), 2, cv2.LINE_AA)
+            cv2.line(display_frame, (cx - 8, cy),     (cx + 8, cy),     (240, 245, 250), 2, cv2.LINE_AA)
+            cv2.line(display_frame, (cx - 8, cy + 6), (cx + 8, cy + 6), (240, 245, 250), 2, cv2.LINE_AA)
 
-            cv2.rectangle(display_frame, (5, 38), (145, max_menu_y), (20, 20, 25), -1)
-            cv2.rectangle(display_frame, (5, 38), (145, max_menu_y), (80, 80, 100), 1)
+        # Desenho da Interface de Menus Moderna e Alinhada
+        if menu_open:
+            bx1, bx2 = 24, 188
 
             if sub_menu is None:
-                # Menu Principal
-                cv2.rectangle(display_frame, (8, 45), (142, 67), (45, 45, 55), -1)
-                cv2.putText(display_frame, "Tirar Foto", (14, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.32, (255, 255, 255), 1)
+                # Painel Principal
+                draw_menu_panel(display_frame, (12, 54), (200, 246), "MENU PRINCIPAL")
 
-                rec_bg = (40, 40, 120) if is_recording else (45, 45, 55)
-                cv2.rectangle(display_frame, (8, 71), (142, 93), rec_bg, -1)
-                cv2.putText(display_frame, "Parar Rec" if is_recording else "Gravar Video", (14, 86), cv2.FONT_HERSHEY_SIMPLEX, 0.32, (255, 255, 255), 1)
+                draw_menu_button(display_frame, (bx1, 96), (bx2, 124), "Tirar Foto", (36, 42, 55), border_color=(65, 75, 95))
 
-                mot_bg = (40, 120, 40) if motion_detection else (45, 45, 55)
-                cv2.rectangle(display_frame, (8, 97), (142, 119), mot_bg, -1)
-                cv2.putText(display_frame, "Det. Movimento", (14, 112), cv2.FONT_HERSHEY_SIMPLEX, 0.32, (255, 255, 255), 1)
+                rec_bg = (120, 35, 45) if is_recording else (36, 42, 55)
+                rec_border = (200, 60, 75) if is_recording else (65, 75, 95)
+                draw_menu_button(display_frame, (bx1, 132), (bx2, 160), "Parar Gravacao" if is_recording else "Gravar Video", rec_bg, border_color=rec_border)
 
-                cv2.rectangle(display_frame, (8, 123), (142, 145), (45, 45, 55), -1)
-                cv2.putText(display_frame, "Configuracoes >", (14, 138), cv2.FONT_HERSHEY_SIMPLEX, 0.32, (255, 255, 255), 1)
+                mot_bg = (30, 110, 50) if motion_detection else (36, 42, 55)
+                mot_border = (50, 180, 85) if motion_detection else (65, 75, 95)
+                draw_menu_button(display_frame, (bx1, 168), (bx2, 196), "Det. Movimento", mot_bg, border_color=mot_border)
+
+                draw_menu_button(display_frame, (bx1, 204), (bx2, 232), "Configuracoes >", (45, 52, 68), border_color=(80, 95, 120))
 
             elif sub_menu == 'config':
-                cv2.rectangle(display_frame, (8, 45), (142, 63), (35, 35, 45), -1)
-                cv2.putText(display_frame, "< Voltar", (14, 57), cv2.FONT_HERSHEY_SIMPLEX, 0.32, (200, 200, 200), 1)
+                # Painel de Configuracoes
+                draw_menu_panel(display_frame, (12, 54), (200, 272), "CONFIGURACOES")
 
-                bg_h = (40, 120, 40) if flip_h else (45, 45, 55)
-                cv2.rectangle(display_frame, (8, 66), (142, 84), bg_h, -1)
-                cv2.putText(display_frame, "Inv. Horiz", (14, 78), cv2.FONT_HERSHEY_SIMPLEX, 0.30, (255, 255, 255), 1)
+                draw_menu_button(display_frame, (bx1, 96), (bx2, 122), "< Voltar", (30, 35, 46), text_color=(180, 190, 205), border_color=(55, 65, 80))
 
-                bg_v = (40, 120, 40) if flip_v else (45, 45, 55)
-                cv2.rectangle(display_frame, (8, 87), (142, 105), bg_v, -1)
-                cv2.putText(display_frame, "Inv. Vert", (14, 99), cv2.FONT_HERSHEY_SIMPLEX, 0.30, (255, 255, 255), 1)
+                h_bg = (30, 110, 50) if flip_h else (36, 42, 55)
+                h_border = (50, 180, 85) if flip_h else (65, 75, 95)
+                draw_menu_button(display_frame, (bx1, 130), (bx2, 156), f"Inverter Horiz: {'LIG' if flip_h else 'DES'}", h_bg, border_color=h_border)
 
-                # Seletor de Rotacao
+                v_bg = (30, 110, 50) if flip_v else (36, 42, 55)
+                v_border = (50, 180, 85) if flip_v else (65, 75, 95)
+                draw_menu_button(display_frame, (bx1, 164), (bx2, 190), f"Inverter Vert: {'LIG' if flip_v else 'DES'}", v_bg, border_color=v_border)
+
+                # Botoes de Rotacao em grid alinhado
                 angles = [0, 90, 180, 270]
-                x_starts = [8, 41, 74, 107]
+                ang_x = [24, 66, 108, 150]
                 for idx_ang, ang in enumerate(angles):
-                    x_s = x_starts[idx_ang]
-                    bg_ang = (40, 120, 40) if rotation_angle == ang else (45, 45, 55)
-                    cv2.rectangle(display_frame, (x_s, 108), (x_s + 30, 124), bg_ang, -1)
-                    cv2.putText(display_frame, f"{ang}", (x_s + 3, 120), cv2.FONT_HERSHEY_SIMPLEX, 0.28, (255, 255, 255), 1)
+                    x_s = ang_x[idx_ang]
+                    is_cur = (rotation_angle == ang)
+                    bg_ang = (30, 110, 50) if is_cur else (36, 42, 55)
+                    brd_ang = (50, 180, 85) if is_cur else (65, 75, 95)
+                    draw_menu_button(display_frame, (x_s, 198), (x_s + 37, 224), f"{ang}", bg_ang, border_color=brd_ang, font_scale=0.32)
 
-                # Exposicao
-                bg_exp = (40, 120, 40) if exposure_manual else (45, 45, 55)
-                cv2.rectangle(display_frame, (8, 127), (142, 145), bg_exp, -1)
-                cv2.putText(display_frame, f"Exp: {'MAN' if exposure_manual else 'AUTO'}", (14, 139), cv2.FONT_HERSHEY_SIMPLEX, 0.30, (255, 255, 255), 1)
-
-                cv2.rectangle(display_frame, (8, 148), (72, 166), (45, 45, 55), -1)
-                cv2.putText(display_frame, "- Exp", (12, 160), cv2.FONT_HERSHEY_SIMPLEX, 0.28, (255, 255, 255), 1)
-                cv2.rectangle(display_frame, (75, 148), (142, 166), (45, 45, 55), -1)
-                cv2.putText(display_frame, f"+ Exp({exposure_val})", (78, 160), cv2.FONT_HERSHEY_SIMPLEX, 0.28, (255, 255, 255), 1)
-
-                cv2.rectangle(display_frame, (8, 169), (142, 189), (45, 45, 55), -1)
-                cv2.putText(display_frame, "Rede e IP >", (14, 182), cv2.FONT_HERSHEY_SIMPLEX, 0.30, (255, 255, 255), 1)
+                draw_menu_button(display_frame, (bx1, 232), (bx2, 258), "Rede e IP >", (45, 52, 68), border_color=(80, 95, 120))
 
             elif sub_menu == 'scanner':
-                cv2.rectangle(display_frame, (8, 45), (142, 65), (35, 35, 45), -1)
-                cv2.putText(display_frame, "< Voltar", (14, 58), cv2.FONT_HERSHEY_SIMPLEX, 0.32, (200, 200, 200), 1)
-
-                cv2.rectangle(display_frame, (8, 69), (142, 89), (60, 40, 100), -1)
-                cv2.putText(display_frame, "Mudar IP", (14, 82), cv2.FONT_HERSHEY_SIMPLEX, 0.30, (255, 255, 255), 1)
-
-                bg_scan = (35, 35, 45) if is_scanning else (40, 110, 40)
-                txt_scan = "Buscando..." if is_scanning else "Escanear Rede"
-                cv2.rectangle(display_frame, (8, 93), (142, 113), bg_scan, -1)
-                cv2.putText(display_frame, txt_scan, (14, 106), cv2.FONT_HERSHEY_SIMPLEX, 0.30, (240, 240, 240), 1)
-
-                y_pos = 129
-                cv2.putText(display_frame, f"IPs: {len(discovered_devices)}", (10, 123), cv2.FONT_HERSHEY_SIMPLEX, 0.30, (0, 255, 255), 1)
-                
+                # Painel do Scanner de Rede
                 max_show = min(5, len(discovered_devices))
+                scanner_panel_h = 236 + (max_show * 28) if max_show > 0 else 240
+                draw_menu_panel(display_frame, (12, 54), (200, scanner_panel_h), "REDE E IP")
+
+                draw_menu_button(display_frame, (bx1, 96), (bx2, 122), "< Voltar", (30, 35, 46), text_color=(180, 190, 205), border_color=(55, 65, 80))
+                draw_menu_button(display_frame, (bx1, 130), (bx2, 156), "Mudar IP", (55, 42, 90), border_color=(95, 75, 150))
+
+                scan_bg = (30, 35, 45) if is_scanning else (30, 110, 50)
+                scan_border = (55, 65, 80) if is_scanning else (50, 180, 85)
+                draw_menu_button(display_frame, (bx1, 164), (bx2, 190), "Buscando..." if is_scanning else "Escanear Rede", scan_bg, border_color=scan_border)
+
+                # Subtitulo da lista de IPs
+                (tw_c, _), _ = cv2.getTextSize(f"IPs Encontrados ({len(discovered_devices)})", cv2.FONT_HERSHEY_SIMPLEX, 0.30, 1)
+                tx_c = 12 + (188 - tw_c) // 2
+                cv2.putText(display_frame, f"IPs Encontrados ({len(discovered_devices)})", (tx_c, 212), cv2.FONT_HERSHEY_SIMPLEX, 0.30, (180, 195, 215), 1, cv2.LINE_AA)
+
                 for idx in range(max_show):
                     ip_addr, _ = discovered_devices[idx]
                     is_active_ip = (ip_addr == camera_ip)
-                    
-                    color = (0, 255, 0) if is_active_ip else (220, 220, 220)
-                    prefix_icon = ">" if is_active_ip else ""
-                    
-                    cv2.rectangle(display_frame, (8, y_pos - 8), (142, y_pos + 6), (50, 50, 60) if is_active_ip else (30, 30, 38), -1)
-                    cv2.putText(display_frame, f"{prefix_icon}{ip_addr}", (10, y_pos), cv2.FONT_HERSHEY_SIMPLEX, 0.30, color, 1)
-                    y_pos += 16
+                    item_y_start = 228 + (idx * 28)
+                    item_y_end = item_y_start + 24
+                    ip_bg = (30, 75, 40) if is_active_ip else (28, 33, 44)
+                    ip_border = (50, 160, 80) if is_active_ip else (50, 60, 75)
+                    ip_text_col = (180, 255, 200) if is_active_ip else (220, 225, 235)
+                    label = f"* {ip_addr}" if is_active_ip else ip_addr
+                    draw_menu_button(display_frame, (bx1, item_y_start), (bx2, item_y_end), label, ip_bg, text_color=ip_text_col, border_color=ip_border, font_scale=0.32)
 
         cv2.imshow(window_name, display_frame)
 
