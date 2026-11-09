@@ -59,6 +59,34 @@ cap = None
 is_connected = False
 is_connecting = False
 stop_threads = False
+reconnect_event = threading.Event()
+current_connection_id = 0
+
+def change_camera_ip(new_ip):
+    """Atualiza o IP da câmera, cancela conexões ativas/em andamento e reinicia o loop de conexão imediatamente"""
+    global camera_ip, cap, is_connected, is_connecting, current_connection_id
+    if not new_ip:
+        return
+    new_ip = new_ip.strip()
+    if not new_ip:
+        return
+
+    print(f"[CONEXÃO] Alterando IP da câmera para: {new_ip} (Interrompendo tentativas anteriores)")
+    camera_ip = new_ip
+    current_connection_id += 1
+    save_config()
+
+    if cap is not None:
+        try:
+            cap.release()
+        except Exception as e:
+            print(f"[AVISO] Erro ao liberar cap anterior: {e}")
+        cap = None
+
+    is_connected = False
+    is_connecting = False
+    # Notifica a thread de conexão para interromper esperas e tentar o novo IP imediatamente
+    reconnect_event.set()
 
 menu_open = False
 sub_menu = None  # None, 'config', 'scanner'
@@ -82,46 +110,73 @@ os.makedirs(save_dir_prints, exist_ok=True)
 print(f"[PASTAS DE SALVAMENTO]:\n - Vídeos: {save_dir_videos}\n - Prints: {save_dir_prints}")
 
 def connect_camera_thread():
-    """Thread em segundo plano para conectar e gerenciar o streaming da câmera de forma não bloqueante"""
-    global cap, is_connected, is_connecting, stop_threads, camera_ip
+    """Thread em segundo plano para conectar e gerenciar o streaming da câmera de forma contínua e interrompível"""
+    global cap, is_connected, is_connecting, stop_threads, camera_ip, current_connection_id, reconnect_event
 
     while not stop_threads:
         if cap is None or not cap.isOpened():
             is_connected = False
             is_connecting = True
-            
-            # Formatos de URL de câmeras IP comuns
+
+            # Captura os dados da tentativa atual
+            target_ip = camera_ip
+            attempt_id = current_connection_id
+            reconnect_event.clear()
+
             urls = [
-                f"http://{camera_ip}:81/stream",
-                f"http://{camera_ip}/stream",
-                f"http://{camera_ip}:8080/video"
+                f"http://{target_ip}:81/stream",
+                f"http://{target_ip}/stream",
+                f"http://{target_ip}:8080/video"
             ]
-            
+
+            connected_this_round = False
             for url in urls:
-                if stop_threads:
+                # Interrompe se o usuário solicitou parada ou mudou de IP
+                if stop_threads or reconnect_event.is_set() or attempt_id != current_connection_id:
                     break
+
                 print(f"[RECONEXÃO] Tentando conectar em {url}...")
                 temp_cap = cv2.VideoCapture(url)
-                
-                # Aguarda abertura com limite de tempo
+
                 start_t = time.time()
-                while time.time() - start_t < 2.5:
+                while time.time() - start_t < 2.0:
+                    if stop_threads or reconnect_event.is_set() or attempt_id != current_connection_id:
+                        temp_cap.release()
+                        temp_cap = None
+                        break
+
                     if temp_cap.isOpened():
-                        cap = temp_cap
-                        is_connected = True
-                        is_connecting = False
-                        print("[RECONEXÃO] Câmera conectada com sucesso!")
+                        # Verifica se o IP ainda é o mesmo antes de associar
+                        if attempt_id == current_connection_id and not reconnect_event.is_set() and not stop_threads:
+                            cap = temp_cap
+                            is_connected = True
+                            is_connecting = False
+                            connected_this_round = True
+                            print(f"[RECONEXÃO] Câmera conectada com sucesso em {url}!")
+                        else:
+                            temp_cap.release()
                         break
                     time.sleep(0.1)
 
-                if is_connected:
+                if connected_this_round:
                     break
-                else:
+                elif temp_cap is not None:
                     temp_cap.release()
 
-            is_connecting = False
+            # Se o IP mudou enquanto tentava, reinicia o loop imediatamente para o novo IP
+            if attempt_id != current_connection_id or reconnect_event.is_set():
+                is_connecting = False
+                continue
 
-        time.sleep(3.0)
+            if not is_connected:
+                is_connecting = True
+                # Espera curta (1.5s) antes da próxima tentativa em loop, mas interrompe imediatamente se houver novo IP
+                reconnect_event.wait(timeout=1.5)
+            else:
+                is_connecting = False
+        else:
+            # Já conectado; aguarda evento de reconexão ou verifica periodicamente se o stream caiu
+            reconnect_event.wait(timeout=1.0)
 
 def scan_single_ip(ip, results):
     """Verifica se um IP específico possui a porta HTTP (80/81/8080) aberta"""
@@ -178,7 +233,7 @@ def start_network_scan():
 
 def prompt_new_ip():
     """Abre uma janela simples do Tkinter para o usuário digitar um novo IP"""
-    global camera_ip, cap
+    global camera_ip
     try:
         root = tk.Tk()
         root.withdraw()
@@ -188,12 +243,7 @@ def prompt_new_ip():
         root.destroy()
         
         if new_ip and new_ip.strip() != "":
-            camera_ip = new_ip.strip()
-            save_config()
-            print(f"[CONFIG] IP atualizado para: {camera_ip}")
-            if cap is not None:
-                cap.release()
-                cap = None
+            change_camera_ip(new_ip)
     except Exception as e:
         print(f"[ERRO] Erro na janela de IP: {e}")
 
@@ -375,12 +425,7 @@ def mouse_callback(event, x, y, flags, param):
                         if btn_x1 <= x <= btn_x2 and item_y_start <= y <= item_y_end:
                             selected_ip, _ = discovered_devices[idx]
                             if camera_ip != selected_ip:
-                                camera_ip = selected_ip
-                                save_config()
-                                print(f"[SCANNER] Novo IP selecionado: {camera_ip}")
-                                if cap is not None:
-                                    cap.release()
-                                    cap = None
+                                change_camera_ip(selected_ip)
                             break
 
 def main():
