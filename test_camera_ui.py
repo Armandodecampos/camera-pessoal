@@ -110,6 +110,99 @@ def test_menu_rendering_and_clicks():
 
     print("PASS: test_menu_rendering_and_clicks")
 
+def test_change_camera_ip_and_reconnection_loop():
+    """Valida que change_camera_ip atualiza IP, reseta cap, sinaliza reconexão imediata e para tentativas anteriores."""
+    import time
+    import threading
+
+    # Simular cap anterior aberto
+    class DummyCap:
+        def __init__(self, opened=True):
+            self._opened = opened
+            self.released = False
+
+        def isOpened(self):
+            return self._opened and not self.released
+
+        def release(self):
+            self.released = True
+
+    dummy_cap = DummyCap(True)
+    app.cap = dummy_cap
+    app.is_connected = True
+    app.is_connecting = False
+    init_conn_id = app.current_connection_id
+
+    app.change_camera_ip("192.168.1.50")
+
+    assert app.camera_ip == "192.168.1.50", "camera_ip não foi atualizado"
+    assert app.cap is None, "cap anterior não foi setado para None"
+    assert dummy_cap.released is True, "cap anterior não foi liberado"
+    assert app.is_connected is False, "is_connected deveria ser False"
+    assert app.current_connection_id > init_conn_id, "current_connection_id deveria ter incrementado"
+    assert app.reconnect_event.is_set(), "reconnect_event deveria ter sido acionado"
+
+    # Testar seleção de IP no menu scanner acionando change_camera_ip
+    app.discovered_devices = [("192.168.1.99", "Camera Nova")]
+    app.menu_open = True
+    app.sub_menu = 'scanner'
+    mouse_param = {'take_photo': False, 'need_resize': False}
+    # Clicar no 1o IP da lista (item_y_start = 228, item_y_end = 252, bx1=24..bx2=188)
+    app.mouse_callback(cv2.EVENT_LBUTTONDOWN, 50, 235, 0, mouse_param)
+    assert app.camera_ip == "192.168.1.99", "Clicar no item da lista deveria atualizar o camera_ip via change_camera_ip"
+
+    print("PASS: test_change_camera_ip_and_reconnection_loop")
+
+def test_connection_loop_aborts_on_new_ip():
+    """Valida que a thread de conexão interrompe imediatamente a tentativa ao mudar de IP e foca no novo IP."""
+    import time
+    import threading
+
+    attempted_urls = []
+    real_VideoCapture = cv2.VideoCapture
+
+    class MockVideoCapture:
+        def __init__(self, url):
+            attempted_urls.append(url)
+            self.url = url
+            self.released = False
+
+        def isOpened(self):
+            # Nunca conecta com sucesso para simular câmera offline tentando em loop
+            return False
+
+        def release(self):
+            self.released = True
+
+    cv2.VideoCapture = MockVideoCapture
+    app.stop_threads = False
+    app.cap = None
+    app.is_connected = False
+    app.camera_ip = "192.168.1.100"
+
+    t = threading.Thread(target=app.connect_camera_thread)
+    t.daemon = True
+    t.start()
+
+    time.sleep(0.3)
+    # Verifica que tentou conectar no IP antigo
+    assert any("192.168.1.100" in u for u in attempted_urls), "Deveria ter tentado conectar no primeiro IP"
+
+    # Agora muda de IP imediatamente enquanto a thread está executando
+    app.change_camera_ip("192.168.2.200")
+    time.sleep(0.3)
+
+    # Verifica que imediatamente passou a tentar o novo IP
+    assert any("192.168.2.200" in u for u in attempted_urls), "Deveria ter passado a tentar o novo IP"
+
+    # Finaliza a thread de teste
+    app.stop_threads = True
+    app.reconnect_event.set()
+    t.join(timeout=1.0)
+    cv2.VideoCapture = real_VideoCapture
+
+    print("PASS: test_connection_loop_aborts_on_new_ip")
+
 def generate_screenshots():
     """Gera screenshots dos menus estilizados para inspeção visual."""
     os.makedirs("test_output", exist_ok=True)
@@ -201,5 +294,7 @@ if __name__ == "__main__":
     test_no_exposure_remnants()
     test_letterbox_no_distortion()
     test_menu_rendering_and_clicks()
+    test_change_camera_ip_and_reconnection_loop()
+    test_connection_loop_aborts_on_new_ip()
     generate_screenshots()
     print("ALL TESTS PASSED SUCCESSFULLY!")
